@@ -28,7 +28,8 @@ TRANS = {
     "register_btn": "注册并登录 / စာရင်းသွင်းပြီး ဝင်ပါ",
     "welcome": "你好 / မင်္ဂလာပါ",
     "logout": "退出 (切换账号) / ထွက်ရန်",
-    "bookmark_hint": "👇 **保存下方链接，下次直接点开不用登录！**\nအောက်ပါလင့်ခ်ကို သိမ်းဆည်းပါ။ နောက်တစ်ကြိမ် ဖုန်းနံပါတ်ရိုက်စရာမလိုပါ",
+    # 🌟 修改点：更清晰的免登录指引
+    "bookmark_hint": "📲 **设置免登录：请点击浏览器菜单 -> 【添加到主屏幕】或【收藏书签】**\nAdd to Home Screen / Bookmark this page",
     "sun_header": "📅 周日 (Sunday) / တနင်္ဂနွေနေ့",
     "sun_rule": "⚠️ 规则：要吃请点【我要吃】 / စားလိုလျှင် 'စားမည်' ကိုနှိပ်ပါ",
     "wd_header": "📅 工作日 (Weekday) / အလုပ်ဖွင့်ရက်",
@@ -293,4 +294,30 @@ else:
             
             if not today_orders.empty:
                 today_orders['phone'] = today_orders['phone'].apply(clean_phone)
-                lunch_data = today_orders
+                lunch_data = today_orders[today_orders['meal_type'] == 'Lunch'][['phone', 'action']]
+                dinner_data = today_orders[today_orders['meal_type'] == 'Dinner'][['phone', 'action']]
+            
+            master_df = master_df.merge(lunch_data, on='phone', how='left').rename(columns={'action': 'L_Stat'})
+            master_df = master_df.merge(dinner_data, on='phone', how='left').rename(columns={'action': 'D_Stat'})
+            master_df = master_df.drop_duplicates(subset=['phone'])
+
+            def calc_final_status(row, status_col):
+                action = row.get(status_col)
+                if pd.isna(action): action = None
+                if is_sunday:
+                    return "✅ 吃" if action == "BOOKED" else "❌ 不吃"
+                else:
+                    return "❌ 不吃" if action == "CANCELED" else "✅ 吃"
+
+            master_df['Lunch'] = master_df.apply(lambda r: calc_final_status(r, 'L_Stat'), axis=1)
+            master_df['Dinner'] = master_df.apply(lambda r: calc_final_status(r, 'D_Stat'), axis=1)
+
+            total = len(master_df)
+            l_cnt = len(master_df[master_df['Lunch'].str.contains("✅")])
+            d_cnt = len(master_df[master_df['Dinner'].str.contains("✅")])
+
+            st.metric("Total", total)
+            c1, c2 = st.columns(2)
+            c1.metric("Lunch", l_cnt)
+            c2.metric("Dinner", d_cnt)
+            st.dataframe(master_df[['name', 'phone', 'Lunch', 'Dinner']], use_container_width=True)
