@@ -287,34 +287,10 @@ else:
             master_df = users_df[['name', 'phone']].copy()
             master_df['phone'] = master_df['phone'].apply(clean_phone)
             
-            lunch_data = pd.DataFrame()
-            dinner_data = pd.DataFrame()
+            # 关键修复：预先初始化带列名的空数据框，防止合并时报错
+            lunch_data = pd.DataFrame(columns=['phone', 'action'])
+            dinner_data = pd.DataFrame(columns=['phone', 'action'])
+            
             if not today_orders.empty:
                 today_orders['phone'] = today_orders['phone'].apply(clean_phone)
-                lunch_data = today_orders[today_orders['meal_type'] == 'Lunch'][['phone', 'action']]
-                dinner_data = today_orders[today_orders['meal_type'] == 'Dinner'][['phone', 'action']]
-            
-            master_df = master_df.merge(lunch_data, on='phone', how='left').rename(columns={'action': 'L_Stat'})
-            master_df = master_df.merge(dinner_data, on='phone', how='left').rename(columns={'action': 'D_Stat'})
-            master_df = master_df.drop_duplicates(subset=['phone'])
-
-            def calc_final_status(row, status_col):
-                action = row.get(status_col)
-                if pd.isna(action): action = None
-                if is_sunday:
-                    return "✅ 吃" if action == "BOOKED" else "❌ 不吃"
-                else:
-                    return "❌ 不吃" if action == "CANCELED" else "✅ 吃"
-
-            master_df['Lunch'] = master_df.apply(lambda r: calc_final_status(r, 'L_Stat'), axis=1)
-            master_df['Dinner'] = master_df.apply(lambda r: calc_final_status(r, 'D_Stat'), axis=1)
-
-            total = len(master_df)
-            l_cnt = len(master_df[master_df['Lunch'].str.contains("✅")])
-            d_cnt = len(master_df[master_df['Dinner'].str.contains("✅")])
-
-            st.metric("Total", total)
-            c1, c2 = st.columns(2)
-            c1.metric("Lunch", l_cnt)
-            c2.metric("Dinner", d_cnt)
-            st.dataframe(master_df[['name', 'phone', 'Lunch', 'Dinner']], use_container_width=True)
+                lunch_data = today_orders
