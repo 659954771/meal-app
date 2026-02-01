@@ -35,14 +35,23 @@ st.markdown("""
     }
     /* 专属链接区域样式 */
     .link-box {
-        padding: 10px;
-        background-color: #e8f5e9;
+        padding: 15px;
+        background-color: #e3f2fd;
         border-radius: 8px;
-        border: 1px solid #c8e6c9;
+        border: 1px solid #bbdefb;
         margin-bottom: 15px;
+        color: #0d47a1;
+        font-size: 14px;
+        line-height: 1.6;
         text-align: center;
-        color: #2e7d32;
-        font-weight: bold;
+    }
+    .url-text {
+        font-family: monospace;
+        background: #fff;
+        padding: 5px;
+        border-radius: 4px;
+        border: 1px solid #ddd;
+        word-break: break-all;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -57,7 +66,6 @@ except:
 
 THAILAND_OFFSET = timedelta(hours=7)
 
-# ⏰ 截止时间
 LUNCH_DEADLINE = time(10, 0)
 DINNER_DEADLINE = time(15, 0)
 AUTO_SWITCH_HOUR = 18
@@ -86,8 +94,8 @@ TRANS = {
     "status_eat": "✅ 状态：吃饭 / စားမယ်",
     "status_no": "❌ 状态：不吃 / မစားပါ",
     "locked": "🔒 已截止 / ပိတ်ပါပြီ",
-    "help_title": "📲 必看：如何设置免登录？",
-    "help_txt": "👉 **最稳妥的方法：**\n1. 点击上方【复制专属链接】\n2. 打开手机浏览器(Chrome/Safari)\n3. 粘贴链接并访问\n4. 将该页面【添加到主屏幕】或【收藏书签】\n\n这样下次打开就是你自己的账号，绝对不用再登录！",
+    "help_title": "📲 必看：如何添加到桌面不掉登录？",
+    "help_txt": "👉 **关键步骤：**\n1. 确保你现在已经登录成功（能看到名字）。\n2. **检查浏览器地址栏**，必须包含 `?phone=xxxx`。\n3. 点击浏览器【分享/菜单】 -> 【添加到主屏幕】。\n\n⚠️ 如果添加后的图标点开还需要登录，请先**删除旧图标**，重新按上述步骤添加。",
     "admin_entry": "🔐 管理员 / Admin",
     "admin_login": "登录后台 / Login",
     "admin_clean": "🧹 深度修复数据 (合并重复项)",
@@ -99,8 +107,7 @@ TRANS = {
     "date_label": "📅 选择报餐日期 / ရက်စွဲရွေးပါ",
     "switch_tmr_hint": "🌙 已过18点，默认显示明天 / မနက်ဖြန်စာရင်း",
     "refresh": "刷新数据 / Refresh",
-    "copy_link": "🔗 复制我的专属链接 (用于收藏)",
-    "copy_success": "✅ 链接已复制！请添加到浏览器书签。",
+    "ios_alert": "📱 **设置免登录图标：**\n请点击浏览器底部的【分享按钮】📤 -> 选择【添加到主屏幕】。\n这样下次直接点图标就能进！",
 }
 
 # ==========================================
@@ -406,16 +413,15 @@ def render_admin_panel():
 # ==========================================
 # 6. 程序入口与 Cookie
 # ==========================================
-# 给 CookieManager 指定 key，防止刷新丢失
 cookie_manager = stx.CookieManager(key="meal_app_auth")
 cookies = cookie_manager.get_all()
 
 def perform_login(phone, name):
     st.session_state.phone = phone
     st.session_state.user_name = name
-    # 设置30天过期
+    # 1. Cookie
     cookie_manager.set("auth_phone", phone, expires_at=datetime.now() + timedelta(days=30))
-    # 强制更新 URL 参数
+    # 2. URL 参数 (重要！这是桌面图标的关键)
     st.query_params["phone"] = phone
     st.rerun()
 
@@ -432,16 +438,13 @@ if 'phone' not in st.session_state:
 if 'user_name' not in st.session_state:
     st.session_state.user_name = None
 
-# --- 自动登录逻辑升级 ---
+# --- 自动登录决策 ---
 if not st.session_state.phone:
-    # 1. 优先查 URL (最稳)
     qp = st.query_params
     url_phone = qp.get("phone", None)
-    
-    # 2. 其次查 Cookie
     cookie_phone = cookies.get("auth_phone") if cookies else None
     
-    # 目标号码
+    # 优先使用 URL 参数 (因为它不会被 iOS 沙盒隔离)
     target = url_phone if url_phone else cookie_phone
     
     if target:
@@ -450,18 +453,17 @@ if not st.session_state.phone:
             st.session_state.phone = user['phone']
             st.session_state.user_name = user['name']
             
-            # 如果是 Cookie 登录的，自动补全 URL
-            if not url_phone:
-                st.query_params["phone"] = user['phone']
-            
-            # 如果是 URL 登录的，自动补全 Cookie
-            if not cookie_phone:
-                cookie_manager.set("auth_phone", user['phone'], expires_at=datetime.now() + timedelta(days=30))
-            
+            # 查漏补缺
+            if not url_phone: st.query_params["phone"] = user['phone']
+            if not cookie_phone: cookie_manager.set("auth_phone", user['phone'], expires_at=datetime.now() + timedelta(days=30))
             st.rerun()
 
-# --- 渲染逻辑 ---
+# --- 渲染路由 ---
 if st.session_state.phone:
+    # 强制锁定 URL，确保添加到桌面的链接永远是对的
+    if st.query_params.get("phone") != st.session_state.phone:
+        st.query_params["phone"] = st.session_state.phone
+
     c1, c2 = st.columns([3, 1])
     with c1:
         st.write(f"👋 {TRANS['welcome']}, **{st.session_state.user_name}**")
@@ -469,12 +471,8 @@ if st.session_state.phone:
     with c2:
         if st.button(TRANS["logout"]): perform_logout()
     
-    # --- 显眼提示：复制链接 ---
-    # 构建当前完整链接 (Streamlit 无法直接获取域名，只能提示复制当前URL)
-    st.markdown(f'<div class="link-box">{TRANS["copy_link"]}</div>', unsafe_allow_html=True)
-    # 提供一个 text_input 方便复制
-    full_link = f"请复制浏览器顶部链接，或收藏此页面"
-    st.caption("✅ 登录成功！请将当前页面【添加到主屏幕】，下次即可免登录。")
+    # 顶部显眼提示
+    st.markdown(f'<div class="link-box">{TRANS["ios_alert"]}</div>', unsafe_allow_html=True)
     
     st.markdown("---")
     
@@ -558,7 +556,6 @@ if st.session_state.phone:
     render_admin_panel()
 
 else:
-    # 登录前逻辑优化：不让 loading 卡住界面
-    # 尝试渲染登录页，如果 Cookie 加载好了会自动跳转
+    # 登录前
     render_login()
     render_admin_panel()
