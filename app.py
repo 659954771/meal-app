@@ -41,10 +41,10 @@ st.markdown("""
 ADMIN_PIN = "8888"
 THAILAND_OFFSET = timedelta(hours=7)
 
-# ⏰ 截止时间 (针对“当天”的限制)
+# ⏰ 截止时间
 LUNCH_DEADLINE = time(10, 0)
 DINNER_DEADLINE = time(15, 0)
-AUTO_SWITCH_HOUR = 18 # 18点后自动跳到明天
+AUTO_SWITCH_HOUR = 18
 
 TRANS = {
     "app_title": "🍱 每日报餐 / နေ့စဉ်ထမင်းစာရင်း",
@@ -101,55 +101,35 @@ def standardize_phone(val):
     """
     if pd.isna(val): return ""
     s = str(val).strip()
-    
-    # 1. 去掉 .0
     if s.endswith(".0"): s = s[:-2]
-    
-    # 2. 只保留数字
     digits = "".join(filter(str.isdigit, s))
-    
-    # 3. 智能补全 '0'
-    # 泰国手机号通常是10位 (08x-xxx-xxxx)
-    # 如果只有9位，说明开头的0被吃掉了，补回来
-    if len(digits) == 9:
-        digits = '0' + digits
-        
+    if len(digits) == 9: digits = '0' + digits
     return digits
 
 def get_db(sheet_name):
     try:
-        # ttl=0 强制不缓存
         df = conn.read(worksheet=sheet_name, ttl=0)
-        
         if sheet_name == "users" and df.empty:
             return pd.DataFrame(columns=["phone", "name", "reg_date"])
         if sheet_name == "orders" and df.empty:
             return pd.DataFrame(columns=["date", "phone", "name", "meal_type", "action", "time"])
-        
-        # 读取时立刻标准化手机号
-        # 这样内存里的数据永远是完美的 '08xxxxxxxx'
         if 'phone' in df.columns:
             df['phone'] = df['phone'].astype(str).apply(standardize_phone)
-            
         return df
     except:
         return pd.DataFrame()
 
 def write_db(sheet_name, df):
-    # 写入前再次标准化，确保写入表格的是 '08xxxxxxxx' 字符串
     if 'phone' in df.columns:
         df['phone'] = df['phone'].astype(str).apply(standardize_phone)
     conn.update(worksheet=sheet_name, data=df)
     st.cache_data.clear()
 
 def admin_clean_database():
-    """管理员修复工具"""
     users = get_db("users")
     if not users.empty:
-        # 保留最后一次注册的信息 (name可能会更新)
         users = users.drop_duplicates(subset=['phone'], keep='last')
         write_db("users", users)
-    
     orders = get_db("orders")
     if not orders.empty:
         orders = orders.drop_duplicates()
@@ -162,7 +142,6 @@ def admin_clean_database():
 def get_user_by_phone(phone):
     df = get_db("users")
     if df.empty: return None
-    # 将输入的号码也标准化，然后对比
     target = standardize_phone(phone)
     res = df[df['phone'] == target]
     return res.iloc[0] if not res.empty else None
@@ -176,14 +155,8 @@ def check_name_exist(name):
 def register_new_user(phone, name):
     df = get_db("users")
     clean_p = standardize_phone(phone)
-    
-    # 1. 手机号查重 (基于标准化号码)
-    if not df.empty and clean_p in df['phone'].values:
-        return "PHONE_EXIST"
-    
-    # 2. 名字查重
-    if check_name_exist(name):
-        return "NAME_EXIST"
+    if not df.empty and clean_p in df['phone'].values: return "PHONE_EXIST"
+    if check_name_exist(name): return "NAME_EXIST"
     
     new_user = pd.DataFrame([{
         "phone": clean_p,
@@ -197,11 +170,9 @@ def register_new_user(phone, name):
 def update_order(phone, name, meal_type, action, target_date_str):
     df = get_db("orders")
     target_p = standardize_phone(phone)
-    
     if not df.empty:
         mask = (df['date'] == target_date_str) & (df['meal_type'] == meal_type) & (df['phone'] == target_p)
         df = df[~mask]
-        
     if action != "DELETE":
         new_row = pd.DataFrame([{
             "date": target_date_str, "phone": target_p, "name": name,
@@ -229,54 +200,81 @@ def calculate_monthly_stats(year, month):
     users = get_db("users")
     orders = get_db("orders")
     if users.empty: return None, None
-    
     num_days = calendar.monthrange(year, month)[1]
     daily_stats = []
     order_map = {} 
-    
     if not orders.empty:
         orders['date'] = orders['date'].astype(str)
         for _, row in orders.iterrows():
             p = standardize_phone(row['phone'])
             key = (row['date'], p, row['meal_type'])
             order_map[key] = row['action']
-            
     user_list = users['phone'].tolist()
     person_stats = {}
     for _, row in users.iterrows():
         p = row['phone'] 
         person_stats[p] = {'L': 0, 'D': 0, 'Name': row['name']}
-    
     for day in range(1, num_days + 1):
         current_date = datetime(year, month, day)
         date_str = current_date.strftime("%Y-%m-%d")
         is_sunday = (current_date.weekday() == 6)
-        
         l_count = 0
         d_count = 0
-        
         for phone in user_list:
             l_act = order_map.get((date_str, phone, 'Lunch'))
             eat_l = (l_act == "BOOKED") if is_sunday else (l_act != "CANCELED")
             if eat_l:
                 l_count += 1
                 if phone in person_stats: person_stats[phone]['L'] += 1
-                
             d_act = order_map.get((date_str, phone, 'Dinner'))
             eat_d = (d_act == "BOOKED") if is_sunday else (d_act != "CANCELED")
             if eat_d:
                 d_count += 1
                 if phone in person_stats: person_stats[phone]['D'] += 1
-        
-        daily_stats.append({
-            "Date": date_str, "Lunch": l_count, "Dinner": d_count
-        })
-        
+        daily_stats.append({"Date": date_str, "Lunch": l_count, "Dinner": d_count})
     return pd.DataFrame(daily_stats), pd.DataFrame.from_dict(person_stats, orient='index')
 
 # ==========================================
-# 5. 页面渲染
+# 5. 页面渲染 (补全登录与后台)
 # ==========================================
+
+# 🟢 补全：登录界面渲染函数
+def render_login():
+    st.title(TRANS["app_title"])
+    
+    with st.container(border=True):
+        st.subheader(TRANS["login_title"])
+        phone = st.text_input(TRANS["login_ph"], key="login_phone")
+        
+        if st.button(TRANS["next_btn"], type="primary"):
+            if phone:
+                clean_p = standardize_phone(phone)
+                with st.spinner("Checking..."):
+                    user = get_user_by_phone(clean_p)
+                    if user is not None:
+                        perform_login(user['phone'], user['name'])
+                    else:
+                        st.session_state.temp_phone = clean_p
+                        st.rerun()
+
+    if 'temp_phone' in st.session_state:
+        st.warning(f"🆕 注册 / Register: {st.session_state.temp_phone}")
+        with st.container(border=True):
+            st.subheader(TRANS["reg_title"])
+            name = st.text_input(TRANS["name_ph"], key="reg_name")
+            
+            if st.button(TRANS["reg_btn"], type="primary"):
+                if name:
+                    with st.spinner("Registering..."):
+                        res = register_new_user(st.session_state.temp_phone, name)
+                        if res == "SUCCESS":
+                            perform_login(st.session_state.temp_phone, name)
+                        elif res == "NAME_EXIST":
+                            st.error(TRANS["err_name_exist"])
+                        elif res == "PHONE_EXIST":
+                            st.error(TRANS["err_user_exist"])
+                        else:
+                            st.error("Error")
 
 def render_admin_panel():
     st.markdown("---")
@@ -321,16 +319,13 @@ def render_admin_panel():
                         today_orders = orders[orders['date'] == view_date_str]
                         if not today_orders.empty:
                             today_orders['phone'] = today_orders['phone'].astype(str).apply(standardize_phone)
-                            
                             l_temp = today_orders[today_orders['meal_type'] == 'Lunch'][['phone', 'action']]
                             if not l_temp.empty: l_act = l_temp
-                            
                             d_temp = today_orders[today_orders['meal_type'] == 'Dinner'][['phone', 'action']]
                             if not d_temp.empty: d_act = d_temp
                     
                     master = users.copy()
                     master['phone'] = master['phone'].astype(str).apply(standardize_phone)
-                    
                     master = master.merge(l_act, on='phone', how='left').rename(columns={'action': 'L'})
                     master = master.merge(d_act, on='phone', how='left').rename(columns={'action': 'D'})
                     master = master.drop_duplicates(subset=['phone'])
@@ -364,7 +359,6 @@ def render_admin_panel():
                     display_df['Lunch'] = display_df['L_Eat'].apply(lambda x: "✅" if x else "❌")
                     display_df['Dinner'] = display_df['D_Eat'].apply(lambda x: "✅" if x else "❌")
                     
-                    # 🔴 修复：只展示美化后的列
                     st.dataframe(display_df[['name', 'phone', 'Lunch', 'Dinner']], use_container_width=True, hide_index=True)
 
             # --- 月度报表 ---
@@ -379,7 +373,6 @@ def render_admin_panel():
                         daily_df, person_df = calculate_monthly_stats(sel_year, sel_month)
                         if daily_df is not None:
                             st.bar_chart(daily_df.set_index("Date")[["Lunch", "Dinner"]])
-                            # 整理个人报表
                             person_df = person_df.reset_index().rename(columns={'index': 'Phone'})
                             person_df['Phone'] = person_df['Phone'].astype(str)
                             st.dataframe(person_df[['Name', 'Phone', 'L', 'D']], use_container_width=True, hide_index=True)
@@ -434,7 +427,6 @@ if st.session_state.phone:
     now = get_thai_time()
     current_time = now.time()
     
-    # 默认日期：过18点自动切明天
     default_date = now.date()
     if now.hour >= AUTO_SWITCH_HOUR:
         default_date = now.date() + timedelta(days=1)
@@ -449,7 +441,6 @@ if st.session_state.phone:
     rule_msg = TRANS["sun_rule"] if is_sun else TRANS["wd_rule"]
     st.info(f"**{rule_title}**\n\n{rule_msg}")
     
-    # 截止判断：只针对【今天】限制，选未来的日期不限制
     is_today_selected = (selected_date == now.date())
     
     col1, col2 = st.columns(2)
