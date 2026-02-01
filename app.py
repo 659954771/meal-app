@@ -82,7 +82,7 @@ TRANS = {
     "month_sel": "选择月份 / Select Month",
     "date_label": "📅 选择报餐日期 / ရက်စွဲရွေးပါ",
     "switch_tmr_hint": "🌙 已过18点，默认显示明天 / မနက်ဖြန်စာရင်း",
-    "refresh": "刷新数据 / Refresh", # 🔴 修复：补全了缺失的翻译键值
+    "refresh": "刷新数据 / Refresh",
 }
 
 # ==========================================
@@ -143,7 +143,7 @@ def write_db(sheet_name, df):
     st.cache_data.clear()
 
 def admin_clean_database():
-    """管理员修复工具：仅在管理员点击时触发"""
+    """管理员修复工具"""
     users = get_db("users")
     if not users.empty:
         # 保留最后一次注册的信息 (name可能会更新)
@@ -232,21 +232,19 @@ def calculate_monthly_stats(year, month):
     
     num_days = calendar.monthrange(year, month)[1]
     daily_stats = []
-    order_map = {} # (date, phone, meal) -> action
+    order_map = {} 
     
     if not orders.empty:
         orders['date'] = orders['date'].astype(str)
         for _, row in orders.iterrows():
-            # 确保 key 里的 phone 也是标准化的
             p = standardize_phone(row['phone'])
             key = (row['date'], p, row['meal_type'])
             order_map[key] = row['action']
             
     user_list = users['phone'].tolist()
-    # 构造个人统计表
     person_stats = {}
     for _, row in users.iterrows():
-        p = row['phone'] # 已经是标准化的
+        p = row['phone'] 
         person_stats[p] = {'L': 0, 'D': 0, 'Name': row['name']}
     
     for day in range(1, num_days + 1):
@@ -365,7 +363,9 @@ def render_admin_panel():
                     display_df['phone'] = display_df['phone'].astype(str)
                     display_df['Lunch'] = display_df['L_Eat'].apply(lambda x: "✅" if x else "❌")
                     display_df['Dinner'] = display_df['D_Eat'].apply(lambda x: "✅" if x else "❌")
-                    st.dataframe(display_df, use_container_width=True, hide_index=True)
+                    
+                    # 🔴 修复：只展示美化后的列
+                    st.dataframe(display_df[['name', 'phone', 'Lunch', 'Dinner']], use_container_width=True, hide_index=True)
 
             # --- 月度报表 ---
             with tab2:
