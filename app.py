@@ -33,6 +33,10 @@ st.markdown("""
         padding: 10px;
         background-color: #ffffff;
     }
+    /* 留饭时间按钮样式 */
+    .late-time-btn {
+        margin: 2px;
+    }
     /* 专属链接区域样式 */
     .link-box {
         padding: 15px;
@@ -70,6 +74,9 @@ LUNCH_DEADLINE = time(10, 0)
 DINNER_DEADLINE = time(15, 0)
 AUTO_SWITCH_HOUR = 18
 
+# 新增：留饭时间选项 (你可以根据实际情况修改这里)
+LATE_OPTIONS = ["19:00", "20:00", "21:00"]
+
 TRANS = {
     "app_title": "🍱 每日报餐 / နေ့စဉ်ထမင်းစာရင်း",
     "welcome": "你好 / မင်္ဂလာပါ",
@@ -90,9 +97,11 @@ TRANS = {
     "dinner": "晚餐 / ညစာ",
     "btn_eat": "我要吃 / စားမယ် (Eat)",
     "btn_no": "我不吃 / မစားဘူး (No)",
+    "btn_late": "留饭(晚回) / ထမင်းချန်မယ်", # 新增按钮
     "btn_undo": "撤销 / ပြန်ပြင်မယ်",
-    "status_eat": "✅ 状态：吃饭 / စားမယ်",
+    "status_eat": "✅ 状态：正常吃饭 / ပုံမှန်စားမယ်",
     "status_no": "❌ 状态：不吃 / မစားပါ",
+    "status_late": "🥡 状态：留饭 / ထမင်းချန်ထား", # 新增状态
     "locked": "🔒 已截止 / ပိတ်ပါပြီ",
     "help_title": "📲 必看：如何添加到桌面不掉登录？",
     "help_txt": "👉 **关键步骤：**\n1. 确保你现在已经登录成功（能看到名字）。\n2. **检查浏览器地址栏**，必须包含 `?phone=xxxx`。\n3. 点击浏览器【分享/菜单】 -> 【添加到主屏幕】。\n\n⚠️ 如果添加后的图标点开还需要登录，请先**删除旧图标**，重新按上述步骤添加。",
@@ -108,6 +117,7 @@ TRANS = {
     "switch_tmr_hint": "🌙 已过18点，默认显示明天 / မနက်ဖြန်စာရင်း",
     "refresh": "刷新数据 / Refresh",
     "ios_alert": "📱 **设置免登录图标：**\n请点击浏览器底部的【分享按钮】📤 -> 选择【添加到主屏幕】。\n这样下次直接点图标就能进！",
+    "chef_view": "👨‍🍳 厨师/留饭看板", # 新增
 }
 
 # ==========================================
@@ -186,12 +196,14 @@ def register_new_user(phone, name):
     write_db("users", updated)
     return "SUCCESS"
 
+# 修改：update_order 现在支持传入 action_value (例如 LATE_19:00)
 def update_order(phone, name, meal_type, action, target_date_str):
     df = get_db("orders")
     target_p = standardize_phone(phone)
     if not df.empty:
         mask = (df['date'] == target_date_str) & (df['meal_type'] == meal_type) & (df['phone'] == target_p)
         df = df[~mask]
+    
     if action != "DELETE":
         new_row = pd.DataFrame([{
             "date": target_date_str, "phone": target_p, "name": name,
@@ -215,6 +227,20 @@ def delete_user_logic(phone):
         updated = df[df['phone'] != target]
         write_db("users", updated)
 
+# 核心逻辑：判断某个人在某天某顿饭的状态
+# 返回: "NORMAL", "LATE_xx:xx", "NO"
+def resolve_meal_status(action, is_sun):
+    if pd.isna(action) or action is None:
+        return "NO" if is_sun else "NORMAL"
+    
+    s_act = str(action)
+    if s_act == "CANCELED": return "NO"
+    if s_act == "DELETE": return "NO" if is_sun else "NORMAL"
+    if s_act == "BOOKED": return "NORMAL"
+    if s_act.startswith("LATE"): return s_act # e.g., LATE_19:00
+    
+    return "NO" if is_sun else "NORMAL"
+
 def calculate_monthly_stats(year, month):
     users = get_db("users")
     orders = get_db("orders")
@@ -228,7 +254,6 @@ def calculate_monthly_stats(year, month):
         mask = (orders['date'] >= start_date) & (orders['date'] <= end_date)
         month_orders = orders.loc[mask].copy()
         month_orders['date_str'] = month_orders['date'].dt.strftime('%Y-%m-%d')
-        month_orders['weekday'] = month_orders['date'].dt.weekday
     else:
         month_orders = pd.DataFrame()
 
@@ -244,16 +269,33 @@ def calculate_monthly_stats(year, month):
         else:
             day_data = pd.DataFrame()
             
-        if is_sun:
-            l_cnt = len(day_data[(day_data['meal_type'] == 'Lunch') & (day_data['action'] == 'BOOKED')])
-            d_cnt = len(day_data[(day_data['meal_type'] == 'Dinner') & (day_data['action'] == 'BOOKED')])
-        else:
-            l_canceled = len(day_data[(day_data['meal_type'] == 'Lunch') & (day_data['action'] == 'CANCELED')])
-            d_canceled = len(day_data[(day_data['meal_type'] == 'Dinner') & (day_data['action'] == 'CANCELED')])
-            l_cnt = total_users - l_canceled
-            d_cnt = total_users - d_canceled
-        daily_stats.append({"Date": d_str, "Lunch": l_cnt, "Dinner": d_cnt})
+        # 统计午餐
+        l_eaters = 0
+        d_eaters = 0
+        
+        # 简单统计逻辑：遍历所有用户判断
+        # (这种方式比直接count dataframe更准确，因为涉及默认规则)
+        user_phones = users['phone'].tolist()
+        for u_p in user_phones:
+            # Lunch
+            l_act = None
+            if not day_data.empty:
+                row = day_data[(day_data['meal_type'] == 'Lunch') & (day_data['phone'] == u_p)]
+                if not row.empty: l_act = row.iloc[-1]['action']
+            if resolve_meal_status(l_act, is_sun) != "NO":
+                l_eaters += 1
+                
+            # Dinner
+            d_act = None
+            if not day_data.empty:
+                row = day_data[(day_data['meal_type'] == 'Dinner') & (day_data['phone'] == u_p)]
+                if not row.empty: d_act = row.iloc[-1]['action']
+            if resolve_meal_status(d_act, is_sun) != "NO":
+                d_eaters += 1
 
+        daily_stats.append({"Date": d_str, "Lunch": l_eaters, "Dinner": d_eaters})
+
+    # 个人统计
     stats_dict = {row['phone']: {'L': 0, 'D': 0, 'Name': row['name']} for _, row in users.iterrows()}
     
     if not month_orders.empty:
@@ -267,11 +309,10 @@ def calculate_monthly_stats(year, month):
             is_sun = (d_obj.weekday() == 6)
             for p in stats_dict:
                 act_l = order_lookup.get((d_str, p, 'Lunch'))
-                eat_l = (act_l == "BOOKED") if is_sun else (act_l != "CANCELED")
-                if eat_l: stats_dict[p]['L'] += 1
+                if resolve_meal_status(act_l, is_sun) != "NO": stats_dict[p]['L'] += 1
+                
                 act_d = order_lookup.get((d_str, p, 'Dinner'))
-                eat_d = (act_d == "BOOKED") if is_sun else (act_d != "CANCELED")
-                if eat_d: stats_dict[p]['D'] += 1
+                if resolve_meal_status(act_d, is_sun) != "NO": stats_dict[p]['D'] += 1
     
     return pd.DataFrame(daily_stats), pd.DataFrame.from_dict(stats_dict, orient='index')
 
@@ -337,8 +378,9 @@ def render_admin_panel():
                     time_lib.sleep(1)
                     st.rerun()
             
-            tab1, tab2 = st.tabs([TRANS["tab_today"], TRANS["tab_month"]])
+            tab1, tab2, tab3 = st.tabs([TRANS["tab_today"], TRANS["tab_month"], TRANS["chef_view"]])
             
+            # --- Tab 1: 原始列表 ---
             with tab1:
                 view_date = st.date_input("查看日期 / View Date", value=get_thai_time().date(), key="admin_date")
                 view_date_str = view_date.strftime("%Y-%m-%d")
@@ -347,37 +389,30 @@ def render_admin_panel():
                 orders = get_db("orders")
                 
                 if not users.empty:
-                    l_act = pd.DataFrame(columns=['phone', 'action'])
-                    d_act = pd.DataFrame(columns=['phone', 'action'])
-                    
-                    if not orders.empty:
-                        today_orders = orders[orders['date'] == view_date_str]
-                        if not today_orders.empty:
-                            today_orders['phone'] = today_orders['phone'].astype(str).apply(standardize_phone)
-                            l_temp = today_orders[today_orders['meal_type'] == 'Lunch'][['phone', 'action']]
-                            if not l_temp.empty: l_act = l_temp
-                            d_temp = today_orders[today_orders['meal_type'] == 'Dinner'][['phone', 'action']]
-                            if not d_temp.empty: d_act = d_temp
-                    
                     master = users.copy()
                     master['phone'] = master['phone'].astype(str).apply(standardize_phone)
-                    master = master.merge(l_act, on='phone', how='left').rename(columns={'action': 'L'})
-                    master = master.merge(d_act, on='phone', how='left').rename(columns={'action': 'D'})
-                    master = master.drop_duplicates(subset=['phone'])
                     
-                    is_sun = (view_date.weekday() == 6)
-                    def check_eat(act, is_sun):
-                        if is_sun: return act == "BOOKED"
-                        return act != "CANCELED"
+                    # 构建 lookup map
+                    l_map = {}
+                    d_map = {}
+                    if not orders.empty:
+                        today_orders = orders[orders['date'] == view_date_str]
+                        for _, r in today_orders.iterrows():
+                            if r['meal_type'] == 'Lunch': l_map[standardize_phone(r['phone'])] = r['action']
+                            if r['meal_type'] == 'Dinner': d_map[standardize_phone(r['phone'])] = r['action']
+
+                    is_sun_view = (view_date.weekday() == 6)
                     
-                    master['L_Eat'] = master['L'].apply(lambda x: check_eat(x, is_sun))
-                    master['D_Eat'] = master['D'].apply(lambda x: check_eat(x, is_sun))
+                    master['L_Status'] = master['phone'].apply(lambda p: resolve_meal_status(l_map.get(p), is_sun_view))
+                    master['D_Status'] = master['phone'].apply(lambda p: resolve_meal_status(d_map.get(p), is_sun_view))
                     
+                    # 统计数字
                     k1, k2, k3 = st.columns(3)
-                    k1.metric("Total", len(master))
-                    k2.metric("Lunch", master['L_Eat'].sum())
-                    k3.metric("Dinner", master['D_Eat'].sum())
+                    k1.metric("总人数", len(master))
+                    k2.metric("午餐", len(master[master['L_Status'] != 'NO']))
+                    k3.metric("晚餐", len(master[master['D_Status'] != 'NO']))
                     
+                    # 删除用户逻辑
                     user_list = master.apply(lambda x: f"{x['name']} ({x['phone']})", axis=1).tolist()
                     sel_user = st.selectbox("Delete User", ["Select..."] + user_list)
                     if st.button("Confirm Delete"):
@@ -385,15 +420,11 @@ def render_admin_panel():
                             target_p = sel_user.split('(')[-1].replace(')', '')
                             delete_user_logic(target_p)
                             st.success("Deleted")
-                            time_lib.sleep(1)
                             st.rerun()
                     
-                    display_df = master[['name', 'phone', 'L_Eat', 'D_Eat']].copy()
-                    display_df['phone'] = display_df['phone'].astype(str)
-                    display_df['Lunch'] = display_df['L_Eat'].apply(lambda x: "✅" if x else "❌")
-                    display_df['Dinner'] = display_df['D_Eat'].apply(lambda x: "✅" if x else "❌")
-                    st.dataframe(display_df[['name', 'phone', 'Lunch', 'Dinner']], use_container_width=True, hide_index=True)
+                    st.dataframe(master[['name', 'phone', 'L_Status', 'D_Status']], use_container_width=True, hide_index=True)
 
+            # --- Tab 2: 月报 ---
             with tab2:
                 now = get_thai_time()
                 c_m1, c_m2 = st.columns(2)
@@ -409,6 +440,30 @@ def render_admin_panel():
                             st.dataframe(person_df[['Name', 'Phone', 'L', 'D']], use_container_width=True, hide_index=True)
                         else:
                             st.warning("No Data")
+
+            # --- Tab 3: 厨师看板 (新增) ---
+            with tab3:
+                st.subheader(f"🥣 留饭/打包清单 ({view_date_str})")
+                
+                # 获取今日晚餐留饭的人
+                # 复用 tab1 计算好的 master
+                late_people = master[master['D_Status'].str.startswith("LATE")]
+                
+                if late_people.empty:
+                    st.info("今天没人留饭 / No one ordered late meal.")
+                else:
+                    # 解析时间并分组
+                    late_people['Time'] = late_people['D_Status'].apply(lambda x: x.split('_')[1] if '_' in x else 'Unknown')
+                    
+                    # 按时间显示
+                    grouped = late_people.groupby('Time')
+                    for time_slot, group in grouped:
+                        with st.container(border=True):
+                            st.markdown(f"#### ⏰ {time_slot} 取餐")
+                            st.warning(f"共 {len(group)} 人")
+                            cols = st.columns(3)
+                            for idx, (_, row) in enumerate(group.iterrows()):
+                                cols[idx % 3].write(f"🏷️ **{row['name']}**")
 
 # ==========================================
 # 6. 程序入口与 Cookie
@@ -497,13 +552,14 @@ if st.session_state.phone:
     
     col1, col2 = st.columns(2)
     
-    # 午餐
+    # --- 午餐逻辑 (保持不变) ---
     with col1:
         with st.container(border=True):
             st.markdown(f"#### {TRANS['lunch']}")
-            stat = get_status(st.session_state.phone, "Lunch", selected_date_str)
-            eat = (stat == "BOOKED") if is_sun else (stat != "CANCELED")
-            if eat: st.success(TRANS["status_eat"])
+            act_raw = get_status(st.session_state.phone, "Lunch", selected_date_str)
+            current_status = resolve_meal_status(act_raw, is_sun)
+            
+            if current_status == "NORMAL": st.success(TRANS["status_eat"])
             else: st.error(TRANS["status_no"])
             
             is_locked = False
@@ -513,24 +569,29 @@ if st.session_state.phone:
             if is_locked:
                 st.caption(TRANS["locked"])
             else:
-                if is_sun:
-                    if not eat:
-                        if st.button(TRANS["btn_eat"], key="l_e", type="primary"): update_order(st.session_state.phone, st.session_state.user_name, "Lunch", "BOOKED", selected_date_str); st.rerun()
-                    else:
+                if current_status == "NORMAL":
+                    # 已经是吃饭状态，显示撤销或不吃
+                    if is_sun: # 周日默认不吃，如果现在是Normal说明点过eat，显示撤销
                         if st.button(TRANS["btn_undo"], key="l_u"): update_order(st.session_state.phone, st.session_state.user_name, "Lunch", "DELETE", selected_date_str); st.rerun()
+                    else: # 工作日默认吃，显示不吃
+                         if st.button(TRANS["btn_no"], key="l_n", type="primary"): update_order(st.session_state.phone, st.session_state.user_name, "Lunch", "CANCELED", selected_date_str); st.rerun()
                 else:
-                    if eat:
-                        if st.button(TRANS["btn_no"], key="l_n", type="primary"): update_order(st.session_state.phone, st.session_state.user_name, "Lunch", "CANCELED", selected_date_str); st.rerun()
-                    else:
+                    # 现在的状态是不吃
+                    if is_sun: # 周日默认不吃，显示我要吃
+                        if st.button(TRANS["btn_eat"], key="l_e", type="primary"): update_order(st.session_state.phone, st.session_state.user_name, "Lunch", "BOOKED", selected_date_str); st.rerun()
+                    else: # 工作日默认吃，如果现在是不吃说明点过no，显示撤销
                         if st.button(TRANS["btn_undo"], key="l_u"): update_order(st.session_state.phone, st.session_state.user_name, "Lunch", "DELETE", selected_date_str); st.rerun()
 
-    # 晚餐
+    # --- 晚餐逻辑 (新增留饭功能) ---
     with col2:
         with st.container(border=True):
             st.markdown(f"#### {TRANS['dinner']}")
-            stat = get_status(st.session_state.phone, "Dinner", selected_date_str)
-            eat = (stat == "BOOKED") if is_sun else (stat != "CANCELED")
-            if eat: st.success(TRANS["status_eat"])
+            act_raw = get_status(st.session_state.phone, "Dinner", selected_date_str)
+            current_status = resolve_meal_status(act_raw, is_sun)
+            
+            # 显示当前状态
+            if current_status == "NORMAL": st.success(TRANS["status_eat"])
+            elif current_status.startswith("LATE"): st.warning(f"{TRANS['status_late']} {current_status.split('_')[1]}")
             else: st.error(TRANS["status_no"])
             
             is_locked = False
@@ -540,16 +601,34 @@ if st.session_state.phone:
             if is_locked:
                 st.caption(TRANS["locked"])
             else:
-                if is_sun:
-                    if not eat:
-                        if st.button(TRANS["btn_eat"], key="d_e", type="primary"): update_order(st.session_state.phone, st.session_state.user_name, "Dinner", "BOOKED", selected_date_str); st.rerun()
-                    else:
-                        if st.button(TRANS["btn_undo"], key="d_u"): update_order(st.session_state.phone, st.session_state.user_name, "Dinner", "DELETE", selected_date_str); st.rerun()
-                else:
-                    if eat:
-                        if st.button(TRANS["btn_no"], key="d_n", type="primary"): update_order(st.session_state.phone, st.session_state.user_name, "Dinner", "CANCELED", selected_date_str); st.rerun()
-                    else:
-                        if st.button(TRANS["btn_undo"], key="d_u"): update_order(st.session_state.phone, st.session_state.user_name, "Dinner", "DELETE", selected_date_str); st.rerun()
+                # 只有当不是“不吃”状态时，才显示“不吃”按钮
+                if current_status != "NO":
+                    if st.button(TRANS["btn_no"], key="d_n", type="primary"): 
+                        update_order(st.session_state.phone, st.session_state.user_name, "Dinner", "CANCELED", selected_date_str)
+                        st.rerun()
+                
+                # 只有当不是“正常吃”状态时，才显示“我要吃”按钮 (周日) 或 “撤销” (工作日)
+                if current_status != "NORMAL":
+                     if is_sun:
+                         if st.button(TRANS["btn_eat"], key="d_e"): 
+                             update_order(st.session_state.phone, st.session_state.user_name, "Dinner", "BOOKED", selected_date_str)
+                             st.rerun()
+                     elif current_status == "NO": # 工作日且当前是不吃，显示撤销回到默认
+                         if st.button(TRANS["btn_undo"], key="d_u"): 
+                             update_order(st.session_state.phone, st.session_state.user_name, "Dinner", "DELETE", selected_date_str)
+                             st.rerun()
+
+                st.markdown("---")
+                # 留饭区域
+                st.write("**留饭/晚回 (Late):**")
+                # 生成时间按钮
+                cols = st.columns(len(LATE_OPTIONS))
+                for idx, t_opt in enumerate(LATE_OPTIONS):
+                    # 检查这个时间是否已被选中
+                    is_active = (current_status == f"LATE_{t_opt}")
+                    if cols[idx].button(t_opt, key=f"late_{t_opt}", disabled=is_active):
+                         update_order(st.session_state.phone, st.session_state.user_name, "Dinner", f"LATE_{t_opt}", selected_date_str)
+                         st.rerun()
 
     st.markdown("---")
     with st.expander(TRANS["help_title"]): st.info(TRANS["help_txt"])
