@@ -99,7 +99,7 @@ TRANS = {
     "btn_eat": "我要吃 / စားမယ် (Eat)",
     "btn_no": "我不吃 / မစားဘူး (No)",
     "btn_late": "留饭 / ထမင်းချန်မယ်", 
-    "btn_undo": "撤销 / ပြန်ပြင်မယ်",
+    "btn_undo": "撤销(恢复) / ပုံမှန်စားမယ်", # 修改翻译：让意思更明确
     "status_eat": "✅ 状态：正常吃饭 / ပုံမှန်စားမယ်",
     "status_no": "❌ 状态：不吃 / မစားပါ",
     "status_late": "🥡 状态：留饭 / ထမင်းချန်ထား",
@@ -605,7 +605,7 @@ if st.session_state.phone:
     
     col1, col2 = st.columns(2)
     
-    # --- 午餐逻辑 (更新：加入留饭) ---
+    # --- 午餐逻辑 (更新：解决留饭后无法恢复正常吃的问题) ---
     with col1:
         with st.container(border=True):
             st.markdown(f"#### {TRANS['lunch']}")
@@ -624,15 +624,15 @@ if st.session_state.phone:
             if is_locked:
                 st.caption(TRANS["locked"])
             else:
-                # 只有当不是“不吃”状态时，才显示“不吃”按钮
+                # 只有当不是“不吃”状态时，才显示“不吃”按钮 (针对普通状态和LATE状态)
                 if current_status != "NO":
                      if st.button(TRANS["btn_no"], key="l_n", type="primary"): update_order(st.session_state.phone, st.session_state.user_name, "Lunch", "CANCELED", selected_date_str); st.rerun()
                 
                 # 只有当不是“正常吃”状态时，才显示“我要吃”或“撤销”
                 if current_status != "NORMAL":
-                    if is_sun: # 周日默认不吃，显示我要吃
+                    if is_sun: # 周日默认不吃，显示我要吃 (留饭也可以通过点这个变回正常)
                         if st.button(TRANS["btn_eat"], key="l_e", type="primary"): update_order(st.session_state.phone, st.session_state.user_name, "Lunch", "BOOKED", selected_date_str); st.rerun()
-                    elif current_status == "NO": # 工作日且当前是不吃，显示撤销回到默认
+                    else: # 工作日默认吃，无论是不吃还是留饭，点这个都恢复默认(正常吃)
                         if st.button(TRANS["btn_undo"], key="l_u"): update_order(st.session_state.phone, st.session_state.user_name, "Lunch", "DELETE", selected_date_str); st.rerun()
 
                 st.markdown("---")
@@ -647,7 +647,7 @@ if st.session_state.phone:
                          update_order(st.session_state.phone, st.session_state.user_name, "Lunch", f"LATE_{t_opt}", selected_date_str)
                          st.rerun()
 
-    # --- 晚餐逻辑 (保持，仅引用新的翻译) ---
+    # --- 晚餐逻辑 (更新：解决留饭后无法恢复正常吃的问题) ---
     with col2:
         with st.container(border=True):
             st.markdown(f"#### {TRANS['dinner']}")
@@ -674,11 +674,11 @@ if st.session_state.phone:
                 
                 # 只有当不是“正常吃”状态时，才显示“我要吃”或“撤销”
                 if current_status != "NORMAL":
-                     if is_sun:
+                     if is_sun: # 周日默认不吃，显示我要吃 (留饭也可以通过点这个变回正常)
                          if st.button(TRANS["btn_eat"], key="d_e"): 
                              update_order(st.session_state.phone, st.session_state.user_name, "Dinner", "BOOKED", selected_date_str)
                              st.rerun()
-                     elif current_status == "NO": # 工作日且当前是不吃，显示撤销回到默认
+                     else: # 工作日默认吃，无论是不吃还是留饭，点这个都恢复默认(正常吃)
                          if st.button(TRANS["btn_undo"], key="d_u"): 
                              update_order(st.session_state.phone, st.session_state.user_name, "Dinner", "DELETE", selected_date_str)
                              st.rerun()
