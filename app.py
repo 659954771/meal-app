@@ -74,8 +74,9 @@ LUNCH_DEADLINE = time(10, 0)
 DINNER_DEADLINE = time(15, 0)
 AUTO_SWITCH_HOUR = 18
 
-# 新增：留饭时间选项 (你可以根据实际情况修改这里)
-LATE_OPTIONS = ["19:00", "20:00", "21:00"]
+# 新增：留饭时间选项 (分别配置午餐和晚餐)
+LUNCH_LATE_OPTIONS = ["12:30", "13:00"]
+DINNER_LATE_OPTIONS = ["19:00", "20:00", "21:00"]
 
 TRANS = {
     "app_title": "🍱 每日报餐 / နေ့စဉ်ထမင်းစာရင်း",
@@ -97,11 +98,12 @@ TRANS = {
     "dinner": "晚餐 / ညစာ",
     "btn_eat": "我要吃 / စားမယ် (Eat)",
     "btn_no": "我不吃 / မစားဘူး (No)",
-    "btn_late": "留饭(晚回) / ထမင်းချန်မယ်", # 新增按钮
+    "btn_late": "留饭 / ထမင်းချန်မယ်", 
     "btn_undo": "撤销 / ပြန်ပြင်မယ်",
     "status_eat": "✅ 状态：正常吃饭 / ပုံမှန်စားမယ်",
     "status_no": "❌ 状态：不吃 / မစားပါ",
-    "status_late": "🥡 状态：留饭 / ထမင်းချန်ထား", # 新增状态
+    "status_late": "🥡 状态：留饭 / ထမင်းချန်ထား",
+    "lbl_late_title": "留饭/晚回 / ထမင်းချန်မယ် (Late):",
     "locked": "🔒 已截止 / ပိတ်ပါပြီ",
     "help_title": "📲 必看：如何添加到桌面不掉登录？",
     "help_txt": "👉 **关键步骤：**\n1. 确保你现在已经登录成功（能看到名字）。\n2. **检查浏览器地址栏**，必须包含 `?phone=xxxx`。\n3. 点击浏览器【分享/菜单】 -> 【添加到主屏幕】。\n\n⚠️ 如果添加后的图标点开还需要登录，请先**删除旧图标**，重新按上述步骤添加。",
@@ -117,7 +119,14 @@ TRANS = {
     "switch_tmr_hint": "🌙 已过18点，默认显示明天 / မနက်ဖြန်စာရင်း",
     "refresh": "刷新数据 / Refresh",
     "ios_alert": "📱 **设置免登录图标：**\n请点击浏览器底部的【分享按钮】📤 -> 选择【添加到主屏幕】。\n这样下次直接点图标就能进！",
-    "chef_view": "👨‍🍳 厨师/留饭看板", # 新增
+    "chef_view": "👨‍🍳 厨师/留饭看板 (Chef)", 
+    "chef_view_title": "🥣 留饭/打包清单 / ထမင်းချန်စာရင်း",
+    "chef_lunch_sec": "☀️ 午餐留饭 / နေ့လည်စာ ထမင်းချန်",
+    "chef_dinner_sec": "🌙 晚餐留饭 / ညစာ ထမင်းချန်",
+    "chef_pickup": "取餐 / ယူရန်",
+    "chef_total": "共 / စုစုပေါင်း",
+    "chef_people": "人 / ယောက်",
+    "chef_empty": "暂无留饭 / ထမင်းချန်သူမရှိပါ",
 }
 
 # ==========================================
@@ -441,26 +450,40 @@ def render_admin_panel():
                         else:
                             st.warning("No Data")
 
-            # --- Tab 3: 厨师看板 (新增) ---
+            # --- Tab 3: 厨师看板 (更新了午餐和缅甸语) ---
             with tab3:
-                st.subheader(f"🥣 留饭/打包清单 ({view_date_str})")
+                st.subheader(f"{TRANS['chef_view_title']} ({view_date_str})")
                 
-                # 获取今日晚餐留饭的人
-                # 复用 tab1 计算好的 master
-                late_people = master[master['D_Status'].str.startswith("LATE")]
-                
-                if late_people.empty:
-                    st.info("今天没人留饭 / No one ordered late meal.")
+                # --- 午餐留饭区域 ---
+                st.markdown(f"### {TRANS['chef_lunch_sec']}")
+                lunch_late_people = master[master['L_Status'].str.startswith("LATE")]
+                if lunch_late_people.empty:
+                    st.caption(TRANS["chef_empty"])
                 else:
-                    # 解析时间并分组
-                    late_people['Time'] = late_people['D_Status'].apply(lambda x: x.split('_')[1] if '_' in x else 'Unknown')
-                    
-                    # 按时间显示
-                    grouped = late_people.groupby('Time')
-                    for time_slot, group in grouped:
+                    lunch_late_people['Time'] = lunch_late_people['L_Status'].apply(lambda x: x.split('_')[1] if '_' in x else 'Unknown')
+                    l_grouped = lunch_late_people.groupby('Time')
+                    for time_slot, group in l_grouped:
                         with st.container(border=True):
-                            st.markdown(f"#### ⏰ {time_slot} 取餐")
-                            st.warning(f"共 {len(group)} 人")
+                            st.markdown(f"#### ⏰ {time_slot} {TRANS['chef_pickup']}")
+                            st.warning(f"{TRANS['chef_total']} {len(group)} {TRANS['chef_people']}")
+                            cols = st.columns(3)
+                            for idx, (_, row) in enumerate(group.iterrows()):
+                                cols[idx % 3].write(f"🏷️ **{row['name']}**")
+                
+                st.markdown("---")
+                
+                # --- 晚餐留饭区域 ---
+                st.markdown(f"### {TRANS['chef_dinner_sec']}")
+                dinner_late_people = master[master['D_Status'].str.startswith("LATE")]
+                if dinner_late_people.empty:
+                    st.caption(TRANS["chef_empty"])
+                else:
+                    dinner_late_people['Time'] = dinner_late_people['D_Status'].apply(lambda x: x.split('_')[1] if '_' in x else 'Unknown')
+                    d_grouped = dinner_late_people.groupby('Time')
+                    for time_slot, group in d_grouped:
+                        with st.container(border=True):
+                            st.markdown(f"#### ⏰ {time_slot} {TRANS['chef_pickup']}")
+                            st.warning(f"{TRANS['chef_total']} {len(group)} {TRANS['chef_people']}")
                             cols = st.columns(3)
                             for idx, (_, row) in enumerate(group.iterrows()):
                                 cols[idx % 3].write(f"🏷️ **{row['name']}**")
@@ -552,14 +575,16 @@ if st.session_state.phone:
     
     col1, col2 = st.columns(2)
     
-    # --- 午餐逻辑 (保持不变) ---
+    # --- 午餐逻辑 (更新：加入留饭) ---
     with col1:
         with st.container(border=True):
             st.markdown(f"#### {TRANS['lunch']}")
             act_raw = get_status(st.session_state.phone, "Lunch", selected_date_str)
             current_status = resolve_meal_status(act_raw, is_sun)
             
+            # 显示当前状态
             if current_status == "NORMAL": st.success(TRANS["status_eat"])
+            elif current_status.startswith("LATE"): st.warning(f"{TRANS['status_late']} {current_status.split('_')[1]}")
             else: st.error(TRANS["status_no"])
             
             is_locked = False
@@ -569,20 +594,30 @@ if st.session_state.phone:
             if is_locked:
                 st.caption(TRANS["locked"])
             else:
-                if current_status == "NORMAL":
-                    # 已经是吃饭状态，显示撤销或不吃
-                    if is_sun: # 周日默认不吃，如果现在是Normal说明点过eat，显示撤销
-                        if st.button(TRANS["btn_undo"], key="l_u"): update_order(st.session_state.phone, st.session_state.user_name, "Lunch", "DELETE", selected_date_str); st.rerun()
-                    else: # 工作日默认吃，显示不吃
-                         if st.button(TRANS["btn_no"], key="l_n", type="primary"): update_order(st.session_state.phone, st.session_state.user_name, "Lunch", "CANCELED", selected_date_str); st.rerun()
-                else:
-                    # 现在的状态是不吃
+                # 只有当不是“不吃”状态时，才显示“不吃”按钮
+                if current_status != "NO":
+                     if st.button(TRANS["btn_no"], key="l_n", type="primary"): update_order(st.session_state.phone, st.session_state.user_name, "Lunch", "CANCELED", selected_date_str); st.rerun()
+                
+                # 只有当不是“正常吃”状态时，才显示“我要吃”或“撤销”
+                if current_status != "NORMAL":
                     if is_sun: # 周日默认不吃，显示我要吃
                         if st.button(TRANS["btn_eat"], key="l_e", type="primary"): update_order(st.session_state.phone, st.session_state.user_name, "Lunch", "BOOKED", selected_date_str); st.rerun()
-                    else: # 工作日默认吃，如果现在是不吃说明点过no，显示撤销
+                    elif current_status == "NO": # 工作日且当前是不吃，显示撤销回到默认
                         if st.button(TRANS["btn_undo"], key="l_u"): update_order(st.session_state.phone, st.session_state.user_name, "Lunch", "DELETE", selected_date_str); st.rerun()
 
-    # --- 晚餐逻辑 (新增留饭功能) ---
+                st.markdown("---")
+                # 午餐留饭区域
+                st.write(f"**{TRANS['lbl_late_title']}**")
+                # 生成午餐时间按钮
+                cols = st.columns(len(LUNCH_LATE_OPTIONS))
+                for idx, t_opt in enumerate(LUNCH_LATE_OPTIONS):
+                    # 检查这个时间是否已被选中
+                    is_active = (current_status == f"LATE_{t_opt}")
+                    if cols[idx].button(t_opt, key=f"lunch_late_{t_opt}", disabled=is_active):
+                         update_order(st.session_state.phone, st.session_state.user_name, "Lunch", f"LATE_{t_opt}", selected_date_str)
+                         st.rerun()
+
+    # --- 晚餐逻辑 (保持，仅引用新的翻译) ---
     with col2:
         with st.container(border=True):
             st.markdown(f"#### {TRANS['dinner']}")
@@ -607,7 +642,7 @@ if st.session_state.phone:
                         update_order(st.session_state.phone, st.session_state.user_name, "Dinner", "CANCELED", selected_date_str)
                         st.rerun()
                 
-                # 只有当不是“正常吃”状态时，才显示“我要吃”按钮 (周日) 或 “撤销” (工作日)
+                # 只有当不是“正常吃”状态时，才显示“我要吃”或“撤销”
                 if current_status != "NORMAL":
                      if is_sun:
                          if st.button(TRANS["btn_eat"], key="d_e"): 
@@ -619,11 +654,11 @@ if st.session_state.phone:
                              st.rerun()
 
                 st.markdown("---")
-                # 留饭区域
-                st.write("**留饭/晚回 (Late):**")
-                # 生成时间按钮
-                cols = st.columns(len(LATE_OPTIONS))
-                for idx, t_opt in enumerate(LATE_OPTIONS):
+                # 晚餐留饭区域
+                st.write(f"**{TRANS['lbl_late_title']}**")
+                # 生成晚餐时间按钮
+                cols = st.columns(len(DINNER_LATE_OPTIONS))
+                for idx, t_opt in enumerate(DINNER_LATE_OPTIONS):
                     # 检查这个时间是否已被选中
                     is_active = (current_status == f"LATE_{t_opt}")
                     if cols[idx].button(t_opt, key=f"late_{t_opt}", disabled=is_active):
