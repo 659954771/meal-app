@@ -387,34 +387,42 @@ def render_admin_panel():
                     time_lib.sleep(1)
                     st.rerun()
             
+            # --- 修复核心：先加载数据，再渲染标签页 ---
+            # 1. 优先加载数据，防止 UnboundLocalError
+            view_date = st.date_input("查看日期 / View Date", value=get_thai_time().date(), key="admin_date")
+            view_date_str = view_date.strftime("%Y-%m-%d")
+
+            users = get_db("users")
+            orders = get_db("orders")
+
+            if users.empty:
+                st.warning("暂无用户数据 / No User Data")
+                # 即使没用户，也需要定义一个空的master防止后面报错，或者直接return
+                master = pd.DataFrame(columns=['name', 'phone', 'L_Status', 'D_Status'])
+            else:
+                master = users.copy()
+                master['phone'] = master['phone'].astype(str).apply(standardize_phone)
+                
+                # 构建 lookup map
+                l_map = {}
+                d_map = {}
+                if not orders.empty:
+                    today_orders = orders[orders['date'] == view_date_str]
+                    for _, r in today_orders.iterrows():
+                        if r['meal_type'] == 'Lunch': l_map[standardize_phone(r['phone'])] = r['action']
+                        if r['meal_type'] == 'Dinner': d_map[standardize_phone(r['phone'])] = r['action']
+
+                is_sun_view = (view_date.weekday() == 6)
+                
+                master['L_Status'] = master['phone'].apply(lambda p: resolve_meal_status(l_map.get(p), is_sun_view))
+                master['D_Status'] = master['phone'].apply(lambda p: resolve_meal_status(d_map.get(p), is_sun_view))
+
+            # 2. 定义标签页
             tab1, tab2, tab3 = st.tabs([TRANS["tab_today"], TRANS["tab_month"], TRANS["chef_view"]])
             
-            # --- Tab 1: 原始列表 ---
+            # --- Tab 1: 原始列表 (修复图标显示) ---
             with tab1:
-                view_date = st.date_input("查看日期 / View Date", value=get_thai_time().date(), key="admin_date")
-                view_date_str = view_date.strftime("%Y-%m-%d")
-                
-                users = get_db("users")
-                orders = get_db("orders")
-                
-                if not users.empty:
-                    master = users.copy()
-                    master['phone'] = master['phone'].astype(str).apply(standardize_phone)
-                    
-                    # 构建 lookup map
-                    l_map = {}
-                    d_map = {}
-                    if not orders.empty:
-                        today_orders = orders[orders['date'] == view_date_str]
-                        for _, r in today_orders.iterrows():
-                            if r['meal_type'] == 'Lunch': l_map[standardize_phone(r['phone'])] = r['action']
-                            if r['meal_type'] == 'Dinner': d_map[standardize_phone(r['phone'])] = r['action']
-
-                    is_sun_view = (view_date.weekday() == 6)
-                    
-                    master['L_Status'] = master['phone'].apply(lambda p: resolve_meal_status(l_map.get(p), is_sun_view))
-                    master['D_Status'] = master['phone'].apply(lambda p: resolve_meal_status(d_map.get(p), is_sun_view))
-                    
+                if not master.empty:
                     # 统计数字
                     k1, k2, k3 = st.columns(3)
                     k1.metric("总人数", len(master))
@@ -431,7 +439,26 @@ def render_admin_panel():
                             st.success("Deleted")
                             st.rerun()
                     
-                    st.dataframe(master[['name', 'phone', 'L_Status', 'D_Status']], use_container_width=True, hide_index=True)
+                    # 修复：格式化显示 (把 LATE_19:00 变成图标)
+                    display_df = master.copy()
+                    def format_status(s):
+                        if s == "NORMAL": return "✅ 吃"
+                        if s == "NO": return "❌ 不吃"
+                        if s.startswith("LATE"): return f"🥡 {s.split('_')[1]}"
+                        return s
+                    
+                    display_df['L_Display'] = display_df['L_Status'].apply(format_status)
+                    display_df['D_Display'] = display_df['D_Status'].apply(format_status)
+
+                    st.dataframe(
+                        display_df[['name', 'phone', 'L_Display', 'D_Display']].rename(
+                            columns={'name': '姓名', 'phone': '电话', 'L_Display': TRANS['lunch'], 'D_Display': TRANS['dinner']}
+                        ), 
+                        use_container_width=True, 
+                        hide_index=True
+                    )
+                else:
+                    st.info("No data.")
 
             # --- Tab 2: 月报 ---
             with tab2:
@@ -450,43 +477,46 @@ def render_admin_panel():
                         else:
                             st.warning("No Data")
 
-            # --- Tab 3: 厨师看板 (更新了午餐和缅甸语) ---
+            # --- Tab 3: 厨师看板 (修复 UnboundLocalError) ---
             with tab3:
                 st.subheader(f"{TRANS['chef_view_title']} ({view_date_str})")
                 
-                # --- 午餐留饭区域 ---
-                st.markdown(f"### {TRANS['chef_lunch_sec']}")
-                lunch_late_people = master[master['L_Status'].str.startswith("LATE")]
-                if lunch_late_people.empty:
-                    st.caption(TRANS["chef_empty"])
+                if master.empty:
+                     st.info(TRANS["chef_empty"])
                 else:
-                    lunch_late_people['Time'] = lunch_late_people['L_Status'].apply(lambda x: x.split('_')[1] if '_' in x else 'Unknown')
-                    l_grouped = lunch_late_people.groupby('Time')
-                    for time_slot, group in l_grouped:
-                        with st.container(border=True):
-                            st.markdown(f"#### ⏰ {time_slot} {TRANS['chef_pickup']}")
-                            st.warning(f"{TRANS['chef_total']} {len(group)} {TRANS['chef_people']}")
-                            cols = st.columns(3)
-                            for idx, (_, row) in enumerate(group.iterrows()):
-                                cols[idx % 3].write(f"🏷️ **{row['name']}**")
-                
-                st.markdown("---")
-                
-                # --- 晚餐留饭区域 ---
-                st.markdown(f"### {TRANS['chef_dinner_sec']}")
-                dinner_late_people = master[master['D_Status'].str.startswith("LATE")]
-                if dinner_late_people.empty:
-                    st.caption(TRANS["chef_empty"])
-                else:
-                    dinner_late_people['Time'] = dinner_late_people['D_Status'].apply(lambda x: x.split('_')[1] if '_' in x else 'Unknown')
-                    d_grouped = dinner_late_people.groupby('Time')
-                    for time_slot, group in d_grouped:
-                        with st.container(border=True):
-                            st.markdown(f"#### ⏰ {time_slot} {TRANS['chef_pickup']}")
-                            st.warning(f"{TRANS['chef_total']} {len(group)} {TRANS['chef_people']}")
-                            cols = st.columns(3)
-                            for idx, (_, row) in enumerate(group.iterrows()):
-                                cols[idx % 3].write(f"🏷️ **{row['name']}**")
+                    # --- 午餐留饭区域 ---
+                    st.markdown(f"### {TRANS['chef_lunch_sec']}")
+                    lunch_late_people = master[master['L_Status'].str.startswith("LATE")]
+                    if lunch_late_people.empty:
+                        st.caption(TRANS["chef_empty"])
+                    else:
+                        lunch_late_people['Time'] = lunch_late_people['L_Status'].apply(lambda x: x.split('_')[1] if '_' in x else 'Unknown')
+                        l_grouped = lunch_late_people.groupby('Time')
+                        for time_slot, group in l_grouped:
+                            with st.container(border=True):
+                                st.markdown(f"#### ⏰ {time_slot} {TRANS['chef_pickup']}")
+                                st.warning(f"{TRANS['chef_total']} {len(group)} {TRANS['chef_people']}")
+                                cols = st.columns(3)
+                                for idx, (_, row) in enumerate(group.iterrows()):
+                                    cols[idx % 3].write(f"🏷️ **{row['name']}**")
+                    
+                    st.markdown("---")
+                    
+                    # --- 晚餐留饭区域 ---
+                    st.markdown(f"### {TRANS['chef_dinner_sec']}")
+                    dinner_late_people = master[master['D_Status'].str.startswith("LATE")]
+                    if dinner_late_people.empty:
+                        st.caption(TRANS["chef_empty"])
+                    else:
+                        dinner_late_people['Time'] = dinner_late_people['D_Status'].apply(lambda x: x.split('_')[1] if '_' in x else 'Unknown')
+                        d_grouped = dinner_late_people.groupby('Time')
+                        for time_slot, group in d_grouped:
+                            with st.container(border=True):
+                                st.markdown(f"#### ⏰ {time_slot} {TRANS['chef_pickup']}")
+                                st.warning(f"{TRANS['chef_total']} {len(group)} {TRANS['chef_people']}")
+                                cols = st.columns(3)
+                                for idx, (_, row) in enumerate(group.iterrows()):
+                                    cols[idx % 3].write(f"🏷️ **{row['name']}**")
 
 # ==========================================
 # 6. 程序入口与 Cookie
