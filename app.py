@@ -94,12 +94,14 @@ TRANS = {
     "sun_rule": "⚠️ 规则：要吃请点【我要吃】 / စားလိုလျှင် 'စားမည်' ကိုနှိပ်ပါ",
     "wd_head": "📅 工作日 (Weekday) / အလုပ်ဖွင့်ရက်",
     "wd_rule": "⚠️ 规则：默认吃饭。不吃请点【我不吃】 / ပုံမှန်စားရမည်။ မစားလိုပါက 'မစားပါ' ကိုနှိပ်ပါ",
+    "leave_head": "🏝️ 休假中 (On Leave) / ခွင့်ယူထားသည်",
+    "leave_rule": "⚠️ 规则：休假期间默认【不吃】。如果要吃请手动点【我要吃】。",
     "lunch": "午餐 / နေ့လည်စာ",
     "dinner": "晚餐 / ညစာ",
     "btn_eat": "我要吃 / စားမယ် (Eat)",
     "btn_no": "我不吃 / မစားဘူး (No)",
     "btn_late": "留饭 / ထမင်းချန်မယ်", 
-    "btn_undo": "撤销(恢复) / ပုံမှန်စားမယ်", # 修改翻译：让意思更明确
+    "btn_undo": "撤销(恢复) / ပုံမှန်စားမယ်", 
     "status_eat": "✅ 状态：正常吃饭 / ပုံမှန်စားမယ်",
     "status_no": "❌ 状态：不吃 / မစားပါ",
     "status_late": "🥡 状态：留饭 / ထမင်းချန်ထား",
@@ -111,6 +113,10 @@ TRANS = {
     "admin_login": "登录后台 / Login",
     "admin_clean": "🧹 深度修复数据 (合并重复项)",
     "admin_clean_success": "修复完成！",
+    "admin_status_mgr": "⚙️ 管理员工状态 / Manage Status",
+    "admin_status_active": "✅ 在职/正常 (Active)",
+    "admin_status_leave": "🏝️ 休假/停餐 (On Leave)",
+    "admin_status_update": "更新状态 / Update Status",
     "cookie_loading": "🔄 正在检测登录状态...",
     "tab_today": "📅 今日看板 / Daily",
     "tab_month": "📊 月度报表 / Monthly",
@@ -149,11 +155,16 @@ def get_db(sheet_name):
     try:
         df = conn.read(worksheet=sheet_name, ttl=0)
         if sheet_name == "users" and df.empty:
-            return pd.DataFrame(columns=["phone", "name", "reg_date"])
+            return pd.DataFrame(columns=["phone", "name", "reg_date", "status"])
         if sheet_name == "orders" and df.empty:
             return pd.DataFrame(columns=["date", "phone", "name", "meal_type", "action", "time"])
         if 'phone' in df.columns:
             df['phone'] = df['phone'].astype(str).apply(standardize_phone)
+        
+        # 兼容性处理：如果users表没有status列，自动补全默认值
+        if sheet_name == "users" and "status" not in df.columns:
+            df["status"] = "active"
+            
         return df
     except:
         return pd.DataFrame()
@@ -196,16 +207,28 @@ def register_new_user(phone, name):
     clean_p = standardize_phone(phone)
     if not df.empty and clean_p in df['phone'].values: return "PHONE_EXIST"
     if check_name_exist(name): return "NAME_EXIST"
+    
+    # 默认新用户状态为 active
     new_user = pd.DataFrame([{
         "phone": clean_p,
         "name": str(name).strip(),
-        "reg_date": get_thai_time().strftime("%Y-%m-%d")
+        "reg_date": get_thai_time().strftime("%Y-%m-%d"),
+        "status": "active"
     }])
     updated = pd.concat([df, new_user], ignore_index=True)
     write_db("users", updated)
     return "SUCCESS"
 
-# 修改：update_order 现在支持传入 action_value (例如 LATE_19:00)
+def update_user_status(phone, new_status):
+    df = get_db("users")
+    target_p = standardize_phone(phone)
+    if not df.empty:
+        # 找到对应行并更新status
+        df.loc[df['phone'] == target_p, 'status'] = new_status
+        write_db("users", df)
+        return True
+    return False
+
 def update_order(phone, name, meal_type, action, target_date_str):
     df = get_db("orders")
     target_p = standardize_phone(phone)
@@ -236,24 +259,40 @@ def delete_user_logic(phone):
         updated = df[df['phone'] != target]
         write_db("users", updated)
 
-# 核心逻辑：判断某个人在某天某顿饭的状态
-# 返回: "NORMAL", "LATE_xx:xx", "NO"
-def resolve_meal_status(action, is_sun):
-    if pd.isna(action) or action is None:
-        return "NO" if is_sun else "NORMAL"
+# 核心逻辑升级：判断状态
+# 参数 user_status: 'active' 或 'leave'
+def resolve_meal_status(action, is_sun, user_status="active"):
+    # 1. 优先判断是否有手动操作记录
+    if pd.notna(action) and action is not None:
+        s_act = str(action)
+        if s_act == "CANCELED": return "NO"
+        if s_act == "DELETE": 
+            # 如果点击了撤销，回归默认状态
+            # 如果是休假，默认就是不吃；如果是正常，看是否周日
+            if user_status == 'leave': return "NO"
+            return "NO" if is_sun else "NORMAL"
+        if s_act == "BOOKED": return "NORMAL"
+        if s_act.startswith("LATE"): return s_act
     
-    s_act = str(action)
-    if s_act == "CANCELED": return "NO"
-    if s_act == "DELETE": return "NO" if is_sun else "NORMAL"
-    if s_act == "BOOKED": return "NORMAL"
-    if s_act.startswith("LATE"): return s_act # e.g., LATE_19:00
+    # 2. 如果没有手动记录，走默认规则
     
+    # 如果用户在休假，默认就是不吃
+    if user_status == 'leave':
+        return "NO"
+        
+    # 如果用户正常
     return "NO" if is_sun else "NORMAL"
 
 def calculate_monthly_stats(year, month):
     users = get_db("users")
     orders = get_db("orders")
     if users.empty: return None, None
+    
+    # 填充 status 默认值
+    if 'status' not in users.columns:
+        users['status'] = 'active'
+    users['status'] = users['status'].fillna('active')
+    
     start_date = f"{year}-{month:02d}-01"
     end_day = calendar.monthrange(year, month)[1]
     end_date = f"{year}-{month:02d}-{end_day}"
@@ -267,31 +306,33 @@ def calculate_monthly_stats(year, month):
         month_orders = pd.DataFrame()
 
     daily_stats = []
+    
+    # 为了统计，构建一个 phone -> status 的映射 (简化处理：假设整个月状态不变，或取当前最新状态)
+    user_status_map = dict(zip(users['phone'], users['status']))
+
     for day in range(1, end_day + 1):
         d_obj = datetime(year, month, day)
         d_str = d_obj.strftime("%Y-%m-%d")
         is_sun = (d_obj.weekday() == 6)
-        total_users = len(users)
         
         if not month_orders.empty:
             day_data = month_orders[month_orders['date_str'] == d_str]
         else:
             day_data = pd.DataFrame()
             
-        # 统计午餐
         l_eaters = 0
         d_eaters = 0
         
-        # 简单统计逻辑：遍历所有用户判断
-        # (这种方式比直接count dataframe更准确，因为涉及默认规则)
         user_phones = users['phone'].tolist()
         for u_p in user_phones:
+            curr_status = user_status_map.get(u_p, 'active')
+            
             # Lunch
             l_act = None
             if not day_data.empty:
                 row = day_data[(day_data['meal_type'] == 'Lunch') & (day_data['phone'] == u_p)]
                 if not row.empty: l_act = row.iloc[-1]['action']
-            if resolve_meal_status(l_act, is_sun) != "NO":
+            if resolve_meal_status(l_act, is_sun, curr_status) != "NO":
                 l_eaters += 1
                 
             # Dinner
@@ -299,7 +340,7 @@ def calculate_monthly_stats(year, month):
             if not day_data.empty:
                 row = day_data[(day_data['meal_type'] == 'Dinner') & (day_data['phone'] == u_p)]
                 if not row.empty: d_act = row.iloc[-1]['action']
-            if resolve_meal_status(d_act, is_sun) != "NO":
+            if resolve_meal_status(d_act, is_sun, curr_status) != "NO":
                 d_eaters += 1
 
         daily_stats.append({"Date": d_str, "Lunch": l_eaters, "Dinner": d_eaters})
@@ -317,11 +358,13 @@ def calculate_monthly_stats(year, month):
             d_str = d_obj.strftime("%Y-%m-%d")
             is_sun = (d_obj.weekday() == 6)
             for p in stats_dict:
+                curr_status = user_status_map.get(p, 'active')
+                
                 act_l = order_lookup.get((d_str, p, 'Lunch'))
-                if resolve_meal_status(act_l, is_sun) != "NO": stats_dict[p]['L'] += 1
+                if resolve_meal_status(act_l, is_sun, curr_status) != "NO": stats_dict[p]['L'] += 1
                 
                 act_d = order_lookup.get((d_str, p, 'Dinner'))
-                if resolve_meal_status(act_d, is_sun) != "NO": stats_dict[p]['D'] += 1
+                if resolve_meal_status(act_d, is_sun, curr_status) != "NO": stats_dict[p]['D'] += 1
     
     return pd.DataFrame(daily_stats), pd.DataFrame.from_dict(stats_dict, orient='index')
 
@@ -340,6 +383,8 @@ def render_login():
                 with st.spinner("Checking..."):
                     user = get_user_by_phone(clean_p)
                     if user is not None:
+                        # 登录时顺便把状态存到 session
+                        st.session_state.user_status = user.get('status', 'active') 
                         perform_login(user['phone'], user['name'])
                     else:
                         st.session_state.temp_phone = clean_p
@@ -355,6 +400,7 @@ def render_login():
                     with st.spinner("Registering..."):
                         res = register_new_user(st.session_state.temp_phone, name)
                         if res == "SUCCESS":
+                            st.session_state.user_status = 'active'
                             perform_login(st.session_state.temp_phone, name)
                         elif res == "NAME_EXIST":
                             st.error(TRANS["err_name_exist"])
@@ -387,8 +433,7 @@ def render_admin_panel():
                     time_lib.sleep(1)
                     st.rerun()
             
-            # --- 修复核心：先加载数据，再渲染标签页 ---
-            # 1. 优先加载数据，防止 UnboundLocalError
+            # 1. 优先加载数据
             view_date = st.date_input("查看日期 / View Date", value=get_thai_time().date(), key="admin_date")
             view_date_str = view_date.strftime("%Y-%m-%d")
 
@@ -397,13 +442,15 @@ def render_admin_panel():
 
             if users.empty:
                 st.warning("暂无用户数据 / No User Data")
-                # 即使没用户，也需要定义一个空的master防止后面报错，或者直接return
-                master = pd.DataFrame(columns=['name', 'phone', 'L_Status', 'D_Status'])
+                master = pd.DataFrame(columns=['name', 'phone', 'L_Status', 'D_Status', 'status'])
             else:
                 master = users.copy()
                 master['phone'] = master['phone'].astype(str).apply(standardize_phone)
+                # 确保 status 存在
+                if 'status' not in master.columns:
+                    master['status'] = 'active'
+                master['status'] = master['status'].fillna('active')
                 
-                # 构建 lookup map
                 l_map = {}
                 d_map = {}
                 if not orders.empty:
@@ -414,13 +461,14 @@ def render_admin_panel():
 
                 is_sun_view = (view_date.weekday() == 6)
                 
-                master['L_Status'] = master['phone'].apply(lambda p: resolve_meal_status(l_map.get(p), is_sun_view))
-                master['D_Status'] = master['phone'].apply(lambda p: resolve_meal_status(d_map.get(p), is_sun_view))
+                # 应用新的解析逻辑，传入 status
+                master['L_Status'] = master.apply(lambda r: resolve_meal_status(l_map.get(r['phone']), is_sun_view, r['status']), axis=1)
+                master['D_Status'] = master.apply(lambda r: resolve_meal_status(d_map.get(r['phone']), is_sun_view, r['status']), axis=1)
 
             # 2. 定义标签页
             tab1, tab2, tab3 = st.tabs([TRANS["tab_today"], TRANS["tab_month"], TRANS["chef_view"]])
             
-            # --- Tab 1: 原始列表 (修复图标显示) ---
+            # --- Tab 1: 原始列表 ---
             with tab1:
                 if not master.empty:
                     # 统计数字
@@ -429,17 +477,40 @@ def render_admin_panel():
                     k2.metric("午餐", len(master[master['L_Status'] != 'NO']))
                     k3.metric("晚餐", len(master[master['D_Status'] != 'NO']))
                     
-                    # 删除用户逻辑
-                    user_list = master.apply(lambda x: f"{x['name']} ({x['phone']})", axis=1).tolist()
-                    sel_user = st.selectbox("Delete User", ["Select..."] + user_list)
-                    if st.button("Confirm Delete"):
-                        if sel_user != "Select...":
-                            target_p = sel_user.split('(')[-1].replace(')', '')
-                            delete_user_logic(target_p)
-                            st.success("Deleted")
-                            st.rerun()
+                    st.markdown("---")
                     
-                    # 修复：格式化显示 (把 LATE_19:00 变成图标)
+                    # --- 管理员功能区：状态管理 ---
+                    st.subheader(TRANS["admin_status_mgr"])
+                    col_m1, col_m2, col_m3 = st.columns([2, 1, 1])
+                    
+                    user_list = master.apply(lambda x: f"{x['name']} ({x['phone']})", axis=1).tolist()
+                    sel_user_mgr = col_m1.selectbox("选择员工 / Select User", ["Select..."] + user_list, key="mgr_user")
+                    
+                    new_status = col_m2.radio("状态 / Status", ["active", "leave"], 
+                                             format_func=lambda x: TRANS["admin_status_active"] if x == "active" else TRANS["admin_status_leave"],
+                                             key="mgr_status", label_visibility="collapsed")
+                    
+                    if col_m3.button(TRANS["admin_status_update"]):
+                        if sel_user_mgr != "Select...":
+                            target_p = sel_user_mgr.split('(')[-1].replace(')', '')
+                            if update_user_status(target_p, new_status):
+                                st.success("Updated!")
+                                time_lib.sleep(1)
+                                st.rerun()
+                    
+                    st.markdown("---")
+
+                    # 删除用户逻辑
+                    with st.expander("🗑️ 删除用户 / Delete User"):
+                        sel_user_del = st.selectbox("选择用户", ["Select..."] + user_list, key="del_user")
+                        if st.button("Confirm Delete", type="primary"):
+                            if sel_user_del != "Select...":
+                                target_p = sel_user_del.split('(')[-1].replace(')', '')
+                                delete_user_logic(target_p)
+                                st.success("Deleted")
+                                st.rerun()
+                    
+                    # 列表显示 (增加状态图标)
                     display_df = master.copy()
                     def format_status(s):
                         if s == "NORMAL": return "✅ 吃"
@@ -447,12 +518,14 @@ def render_admin_panel():
                         if s.startswith("LATE"): return f"🥡 {s.split('_')[1]}"
                         return s
                     
+                    # 增加状态图标列
+                    display_df['St'] = display_df['status'].apply(lambda x: "🟢" if x == 'active' else "🔴")
                     display_df['L_Display'] = display_df['L_Status'].apply(format_status)
                     display_df['D_Display'] = display_df['D_Status'].apply(format_status)
 
                     st.dataframe(
-                        display_df[['name', 'phone', 'L_Display', 'D_Display']].rename(
-                            columns={'name': '姓名', 'phone': '电话', 'L_Display': TRANS['lunch'], 'D_Display': TRANS['dinner']}
+                        display_df[['St', 'name', 'phone', 'L_Display', 'D_Display']].rename(
+                            columns={'St': '状态', 'name': '姓名', 'phone': '电话', 'L_Display': TRANS['lunch'], 'D_Display': TRANS['dinner']}
                         ), 
                         use_container_width=True, 
                         hide_index=True
@@ -462,6 +535,7 @@ def render_admin_panel():
 
             # --- Tab 2: 月报 ---
             with tab2:
+                # 月报逻辑已在 calculate_monthly_stats 中更新
                 now = get_thai_time()
                 c_m1, c_m2 = st.columns(2)
                 sel_year = c_m1.number_input("Year", min_value=2024, max_value=2030, value=now.year)
@@ -477,13 +551,16 @@ def render_admin_panel():
                         else:
                             st.warning("No Data")
 
-            # --- Tab 3: 厨师看板 (修复 UnboundLocalError) ---
+            # --- Tab 3: 厨师看板 ---
             with tab3:
                 st.subheader(f"{TRANS['chef_view_title']} ({view_date_str})")
                 
                 if master.empty:
                      st.info(TRANS["chef_empty"])
                 else:
+                    # 厨师看板逻辑与之前一致，因为 master 中的 L_Status 已经通过 resolve_meal_status 处理了休假逻辑
+                    # (即休假的人如果没有手动点留饭，L_Status 是 NO，不会出现在这里)
+                    
                     # --- 午餐留饭区域 ---
                     st.markdown(f"### {TRANS['chef_lunch_sec']}")
                     lunch_late_people = master[master['L_Status'].str.startswith("LATE")]
@@ -529,7 +606,7 @@ def perform_login(phone, name):
     st.session_state.user_name = name
     # 1. Cookie
     cookie_manager.set("auth_phone", phone, expires_at=datetime.now() + timedelta(days=30))
-    # 2. URL 参数 (重要！这是桌面图标的关键)
+    # 2. URL 参数
     st.query_params["phone"] = phone
     st.rerun()
 
@@ -537,6 +614,7 @@ def perform_logout():
     cookie_manager.delete("auth_phone")
     st.session_state.phone = None
     st.session_state.user_name = None
+    st.session_state.user_status = None # 清理状态
     st.session_state.admin_authed = False
     st.query_params.clear()
     st.rerun()
@@ -545,6 +623,8 @@ if 'phone' not in st.session_state:
     st.session_state.phone = None
 if 'user_name' not in st.session_state:
     st.session_state.user_name = None
+if 'user_status' not in st.session_state:
+    st.session_state.user_status = 'active' # 默认活跃
 
 # --- 自动登录决策 ---
 if not st.session_state.phone:
@@ -552,7 +632,6 @@ if not st.session_state.phone:
     url_phone = qp.get("phone", None)
     cookie_phone = cookies.get("auth_phone") if cookies else None
     
-    # 优先使用 URL 参数 (因为它不会被 iOS 沙盒隔离)
     target = url_phone if url_phone else cookie_phone
     
     if target:
@@ -560,15 +639,15 @@ if not st.session_state.phone:
         if user is not None:
             st.session_state.phone = user['phone']
             st.session_state.user_name = user['name']
+            # 读取状态
+            st.session_state.user_status = user.get('status', 'active')
             
-            # 查漏补缺
             if not url_phone: st.query_params["phone"] = user['phone']
             if not cookie_phone: cookie_manager.set("auth_phone", user['phone'], expires_at=datetime.now() + timedelta(days=30))
             st.rerun()
 
 # --- 渲染路由 ---
 if st.session_state.phone:
-    # 强制锁定 URL，确保添加到桌面的链接永远是对的
     if st.query_params.get("phone") != st.session_state.phone:
         st.query_params["phone"] = st.session_state.phone
 
@@ -576,12 +655,13 @@ if st.session_state.phone:
     with c1:
         st.write(f"👋 {TRANS['welcome']}, **{st.session_state.user_name}**")
         st.caption(f"📱 {st.session_state.phone}")
+        # 显示休假状态
+        if st.session_state.user_status == 'leave':
+             st.warning(f"**{TRANS['leave_head']}**")
     with c2:
         if st.button(TRANS["logout"]): perform_logout()
     
-    # 顶部显眼提示
     st.markdown(f'<div class="link-box">{TRANS["ios_alert"]}</div>', unsafe_allow_html=True)
-    
     st.markdown("---")
     
     now = get_thai_time()
@@ -596,23 +676,27 @@ if st.session_state.phone:
     selected_date_str = selected_date.strftime("%Y-%m-%d")
     
     is_sun = (selected_date.weekday() == 6)
+    is_on_leave = (st.session_state.user_status == 'leave')
     
-    rule_title = TRANS["sun_head"] if is_sun else TRANS["wd_head"]
-    rule_msg = TRANS["sun_rule"] if is_sun else TRANS["wd_rule"]
-    st.info(f"**{rule_title}**\n\n{rule_msg}")
+    # 动态显示规则提示
+    if is_on_leave:
+        st.warning(TRANS["leave_rule"])
+    else:
+        rule_title = TRANS["sun_head"] if is_sun else TRANS["wd_head"]
+        rule_msg = TRANS["sun_rule"] if is_sun else TRANS["wd_rule"]
+        st.info(f"**{rule_title}**\n\n{rule_msg}")
     
     is_today_selected = (selected_date == now.date())
-    
     col1, col2 = st.columns(2)
     
-    # --- 午餐逻辑 (更新：解决留饭后无法恢复正常吃的问题) ---
+    # --- 午餐逻辑 ---
     with col1:
         with st.container(border=True):
             st.markdown(f"#### {TRANS['lunch']}")
             act_raw = get_status(st.session_state.phone, "Lunch", selected_date_str)
-            current_status = resolve_meal_status(act_raw, is_sun)
+            # 传入当前用户的状态
+            current_status = resolve_meal_status(act_raw, is_sun, st.session_state.user_status)
             
-            # 显示当前状态
             if current_status == "NORMAL": st.success(TRANS["status_eat"])
             elif current_status.startswith("LATE"): st.warning(f"{TRANS['status_late']} {current_status.split('_')[1]}")
             else: st.error(TRANS["status_no"])
@@ -624,37 +708,32 @@ if st.session_state.phone:
             if is_locked:
                 st.caption(TRANS["locked"])
             else:
-                # 只有当不是“不吃”状态时，才显示“不吃”按钮 (针对普通状态和LATE状态)
                 if current_status != "NO":
                      if st.button(TRANS["btn_no"], key="l_n", type="primary"): update_order(st.session_state.phone, st.session_state.user_name, "Lunch", "CANCELED", selected_date_str); st.rerun()
                 
-                # 只有当不是“正常吃”状态时，才显示“我要吃”或“撤销”
                 if current_status != "NORMAL":
-                    if is_sun: # 周日默认不吃，显示我要吃 (留饭也可以通过点这个变回正常)
+                    # 只有在休假状态或者周日，或者已经点了不吃的情况下，才显示“我要吃”
+                    if is_sun or is_on_leave: 
                         if st.button(TRANS["btn_eat"], key="l_e", type="primary"): update_order(st.session_state.phone, st.session_state.user_name, "Lunch", "BOOKED", selected_date_str); st.rerun()
-                    else: # 工作日默认吃，无论是不吃还是留饭，点这个都恢复默认(正常吃)
+                    else: 
                         if st.button(TRANS["btn_undo"], key="l_u"): update_order(st.session_state.phone, st.session_state.user_name, "Lunch", "DELETE", selected_date_str); st.rerun()
 
                 st.markdown("---")
-                # 午餐留饭区域
                 st.write(f"**{TRANS['lbl_late_title']}**")
-                # 生成午餐时间按钮
                 cols = st.columns(len(LUNCH_LATE_OPTIONS))
                 for idx, t_opt in enumerate(LUNCH_LATE_OPTIONS):
-                    # 检查这个时间是否已被选中
                     is_active = (current_status == f"LATE_{t_opt}")
                     if cols[idx].button(t_opt, key=f"lunch_late_{t_opt}", disabled=is_active):
                          update_order(st.session_state.phone, st.session_state.user_name, "Lunch", f"LATE_{t_opt}", selected_date_str)
                          st.rerun()
 
-    # --- 晚餐逻辑 (更新：解决留饭后无法恢复正常吃的问题) ---
+    # --- 晚餐逻辑 ---
     with col2:
         with st.container(border=True):
             st.markdown(f"#### {TRANS['dinner']}")
             act_raw = get_status(st.session_state.phone, "Dinner", selected_date_str)
-            current_status = resolve_meal_status(act_raw, is_sun)
+            current_status = resolve_meal_status(act_raw, is_sun, st.session_state.user_status)
             
-            # 显示当前状态
             if current_status == "NORMAL": st.success(TRANS["status_eat"])
             elif current_status.startswith("LATE"): st.warning(f"{TRANS['status_late']} {current_status.split('_')[1]}")
             else: st.error(TRANS["status_no"])
@@ -666,30 +745,25 @@ if st.session_state.phone:
             if is_locked:
                 st.caption(TRANS["locked"])
             else:
-                # 只有当不是“不吃”状态时，才显示“不吃”按钮
                 if current_status != "NO":
                     if st.button(TRANS["btn_no"], key="d_n", type="primary"): 
                         update_order(st.session_state.phone, st.session_state.user_name, "Dinner", "CANCELED", selected_date_str)
                         st.rerun()
                 
-                # 只有当不是“正常吃”状态时，才显示“我要吃”或“撤销”
                 if current_status != "NORMAL":
-                     if is_sun: # 周日默认不吃，显示我要吃 (留饭也可以通过点这个变回正常)
+                     if is_sun or is_on_leave:
                          if st.button(TRANS["btn_eat"], key="d_e"): 
                              update_order(st.session_state.phone, st.session_state.user_name, "Dinner", "BOOKED", selected_date_str)
                              st.rerun()
-                     else: # 工作日默认吃，无论是不吃还是留饭，点这个都恢复默认(正常吃)
+                     else:
                          if st.button(TRANS["btn_undo"], key="d_u"): 
                              update_order(st.session_state.phone, st.session_state.user_name, "Dinner", "DELETE", selected_date_str)
                              st.rerun()
 
                 st.markdown("---")
-                # 晚餐留饭区域
                 st.write(f"**{TRANS['lbl_late_title']}**")
-                # 生成晚餐时间按钮
                 cols = st.columns(len(DINNER_LATE_OPTIONS))
                 for idx, t_opt in enumerate(DINNER_LATE_OPTIONS):
-                    # 检查这个时间是否已被选中
                     is_active = (current_status == f"LATE_{t_opt}")
                     if cols[idx].button(t_opt, key=f"late_{t_opt}", disabled=is_active):
                          update_order(st.session_state.phone, st.session_state.user_name, "Dinner", f"LATE_{t_opt}", selected_date_str)
@@ -700,6 +774,5 @@ if st.session_state.phone:
     render_admin_panel()
 
 else:
-    # 登录前
     render_login()
     render_admin_panel()
