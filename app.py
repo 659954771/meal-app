@@ -492,28 +492,33 @@ def render_admin_panel():
                     
                     st.markdown("---")
                     
-                    # --- 管理员功能区：状态管理 (修改为多选) ---
+                    # --- 管理员功能区：状态管理 (修改为多选 + Form) ---
                     st.subheader(TRANS["admin_status_mgr"])
-                    col_m1, col_m2, col_m3 = st.columns([2, 1, 1])
                     
-                    user_list = master.apply(lambda x: f"{x['name']} ({x['phone']})", axis=1).tolist()
-                    # 变更为多选框
-                    sel_users_mgr = col_m1.multiselect("选择员工(可多选) / Select Users", user_list, key="mgr_users")
-                    
-                    new_status = col_m2.radio("状态 / Status", ["active", "leave"], 
-                                             format_func=lambda x: TRANS["admin_status_active"] if x == "active" else TRANS["admin_status_leave"],
-                                             key="mgr_status", label_visibility="collapsed")
-                    
-                    if col_m3.button(TRANS["admin_status_update"]):
-                        if sel_users_mgr:
-                            # 提取所有选中的电话号码
-                            target_phones = [u.split('(')[-1].replace(')', '') for u in sel_users_mgr]
-                            if batch_update_user_status(target_phones, new_status):
-                                st.success(f"Updated {len(target_phones)} users!")
-                                time_lib.sleep(1)
-                                st.rerun()
-                        else:
-                            st.warning("Please select at least one user.")
+                    with st.form("status_update_form"):
+                        col_m1, col_m2, col_m3 = st.columns([2, 1, 1])
+                        
+                        user_list = master.apply(lambda x: f"{x['name']} ({x['phone']})", axis=1).tolist()
+                        # 变更为多选框
+                        sel_users_mgr = col_m1.multiselect("选择员工(可多选) / Select Users", user_list, key="mgr_users")
+                        
+                        new_status = col_m2.radio("状态 / Status", ["active", "leave"], 
+                                                 format_func=lambda x: TRANS["admin_status_active"] if x == "active" else TRANS["admin_status_leave"],
+                                                 key="mgr_status", label_visibility="collapsed")
+                        
+                        # Form submit button
+                        submitted = col_m3.form_submit_button(TRANS["admin_status_update"])
+                        
+                        if submitted:
+                            if sel_users_mgr:
+                                # 提取所有选中的电话号码
+                                target_phones = [u.split('(')[-1].replace(')', '') for u in sel_users_mgr]
+                                if batch_update_user_status(target_phones, new_status):
+                                    st.success(f"Updated {len(target_phones)} users to {new_status}!")
+                                    time_lib.sleep(1) # Wait for propagation
+                                    st.rerun()
+                            else:
+                                st.warning("Please select at least one user.")
                     
                     st.markdown("---")
 
