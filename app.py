@@ -116,7 +116,7 @@ TRANS = {
     "admin_status_mgr": "⚙️ 管理员工状态 / Manage Status",
     "admin_status_active": "✅ 在职/正常 (Active)",
     "admin_status_leave": "🏝️ 休假/停餐 (On Leave)",
-    "admin_status_update": "更新状态 / Update Status",
+    "admin_status_update": "批量更新 / Batch Update", # Updated text
     "cookie_loading": "🔄 正在检测登录状态...",
     "tab_today": "📅 今日看板 / Daily",
     "tab_month": "📊 月度报表 / Monthly",
@@ -133,6 +133,7 @@ TRANS = {
     "chef_total": "共 / စုစုပေါင်း",
     "chef_people": "人 / ယောက်",
     "chef_empty": "暂无留饭 / ထမင်းချန်သူမရှိပါ",
+    "user_settings": "休假设置 / Leave Settings", # New
 }
 
 # ==========================================
@@ -225,6 +226,18 @@ def update_user_status(phone, new_status):
     if not df.empty:
         # 找到对应行并更新status
         df.loc[df['phone'] == target_p, 'status'] = new_status
+        write_db("users", df)
+        return True
+    return False
+
+# 新增：批量更新用户状态
+def batch_update_user_status(phone_list, new_status):
+    df = get_db("users")
+    if not df.empty:
+        # 清洗电话号码列表
+        clean_phones = [standardize_phone(p) for p in phone_list]
+        # 批量更新
+        df.loc[df['phone'].isin(clean_phones), 'status'] = new_status
         write_db("users", df)
         return True
     return False
@@ -479,24 +492,28 @@ def render_admin_panel():
                     
                     st.markdown("---")
                     
-                    # --- 管理员功能区：状态管理 ---
+                    # --- 管理员功能区：状态管理 (修改为多选) ---
                     st.subheader(TRANS["admin_status_mgr"])
                     col_m1, col_m2, col_m3 = st.columns([2, 1, 1])
                     
                     user_list = master.apply(lambda x: f"{x['name']} ({x['phone']})", axis=1).tolist()
-                    sel_user_mgr = col_m1.selectbox("选择员工 / Select User", ["Select..."] + user_list, key="mgr_user")
+                    # 变更为多选框
+                    sel_users_mgr = col_m1.multiselect("选择员工(可多选) / Select Users", user_list, key="mgr_users")
                     
                     new_status = col_m2.radio("状态 / Status", ["active", "leave"], 
                                              format_func=lambda x: TRANS["admin_status_active"] if x == "active" else TRANS["admin_status_leave"],
                                              key="mgr_status", label_visibility="collapsed")
                     
                     if col_m3.button(TRANS["admin_status_update"]):
-                        if sel_user_mgr != "Select...":
-                            target_p = sel_user_mgr.split('(')[-1].replace(')', '')
-                            if update_user_status(target_p, new_status):
-                                st.success("Updated!")
+                        if sel_users_mgr:
+                            # 提取所有选中的电话号码
+                            target_phones = [u.split('(')[-1].replace(')', '') for u in sel_users_mgr]
+                            if batch_update_user_status(target_phones, new_status):
+                                st.success(f"Updated {len(target_phones)} users!")
                                 time_lib.sleep(1)
                                 st.rerun()
+                        else:
+                            st.warning("Please select at least one user.")
                     
                     st.markdown("---")
 
@@ -661,6 +678,29 @@ if st.session_state.phone:
     with c2:
         if st.button(TRANS["logout"]): perform_logout()
     
+    # --- 新增：员工自助设置状态 ---
+    with st.expander("⚙️ " + TRANS["user_settings"]):
+        st.write("设置我的状态 / Set My Status:")
+        
+        # 状态切换回调函数
+        def on_user_status_change():
+            new_status = st.session_state.user_status_radio
+            update_user_status(st.session_state.phone, new_status)
+            st.session_state.user_status = new_status
+            
+        current_s = st.session_state.user_status
+        st.radio(
+            "选择状态",
+            ["active", "leave"],
+            index=0 if current_s == 'active' else 1,
+            format_func=lambda x: TRANS["admin_status_active"] if x == "active" else TRANS["admin_status_leave"],
+            horizontal=True,
+            key="user_status_radio",
+            on_change=on_user_status_change,
+            label_visibility="collapsed"
+        )
+    # -----------------------------
+
     st.markdown(f'<div class="link-box">{TRANS["ios_alert"]}</div>', unsafe_allow_html=True)
     st.markdown("---")
     
